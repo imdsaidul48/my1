@@ -1,0 +1,204 @@
+name: Windows RDP with Tailscale & Selected Apps
+
+on:
+  workflow_dispatch:
+
+jobs:
+  rdp-session:
+    runs-on: windows-latest
+    timeout-minutes: 360
+
+    steps:
+      - name: 1. Set Runneradmin Password
+        shell: powershell
+        run: |
+          $Password = ConvertTo-SecureString "Demochy12@#" -AsPlainText -Force
+          Set-LocalUser -Name "runneradmin" -Password $Password
+
+      - name: 2. Enable Remote Desktop (RDP)
+        shell: powershell
+        run: |
+          Set-ItemProperty -Path 'HKLM:\System\CurrentControlSet\Control\Terminal Server' -Name "fDenyTSConnections" -Value 0
+          Enable-NetFirewallRule -DisplayGroup "Remote Desktop"
+          Set-ItemProperty -Path 'HKLM:\System\CurrentControlSet\Control\Terminal Server\WinStations\RDP-Tcp' -Name "UserAuthentication" -Value 1
+
+      - name: 3. Configure Windows Preferences & Google Chrome
+        shell: powershell
+        run: |
+          Write-Host "Configuring Windows Preferences and Google Chrome..."
+
+          # 1. Set Google Chrome as Default Browser
+          $assocXml = "C:\Windows\Temp\DefaultAssociations.xml"
+          $assocLines = @(
+              '<?xml version="1.0" encoding="UTF-8"?>',
+              '<DefaultAssociations>',
+              '  <Association Identifier=".htm" ProgId="ChromeHTML" ApplicationName="Google Chrome" />',
+              '  <Association Identifier=".html" ProgId="ChromeHTML" ApplicationName="Google Chrome" />',
+              '  <Association Identifier="http" ProgId="ChromeHTML" ApplicationName="Google Chrome" />',
+              '  <Association Identifier="https" ProgId="ChromeHTML" ApplicationName="Google Chrome" />',
+              '</DefaultAssociations>'
+          )
+          $assocLines | Set-Content -Path $assocXml -Encoding UTF8
+          Dism.exe /Online /Import-DefaultAppAssociations:$assocXml
+
+          # 2. Create Google Chrome Desktop Shortcuts
+          New-Item -ItemType Directory -Path "C:\Users\runneradmin\Desktop" -Force | Out-Null
+          $WshShell = New-Object -ComObject WScript.Shell
+          $chromePath = "C:\Program Files\Google\Chrome\Application\chrome.exe"
+          if (Test-Path $chromePath) {
+              $sc1 = $WshShell.CreateShortcut("C:\Users\Public\Desktop\Google Chrome.lnk")
+              $sc1.TargetPath = $chromePath
+              $sc1.Save()
+              $sc2 = $WshShell.CreateShortcut("C:\Users\runneradmin\Desktop\Google Chrome.lnk")
+              $sc2.TargetPath = $chromePath
+              $sc2.Save()
+          }
+
+          # 3. Configure Tweaks for Logon (Dark Mode, This PC, Single-Click, Show File Extensions)
+          $tweakLines = @(
+              '# Dark Mode (System and Apps)',
+              '$themePath = "HKCU:\Software\Microsoft\Windows\CurrentVersion\Themes\Personalize"',
+              'if (-not (Test-Path $themePath)) { New-Item -Path $themePath -Force | Out-Null }',
+              'Set-ItemProperty -Path $themePath -Name "AppsUseLightTheme" -Value 0',
+              'Set-ItemProperty -Path $themePath -Name "SystemUsesLightTheme" -Value 0',
+              '',
+              '# File Explorer: Open to This PC (1) and Show File Extensions (0)',
+              '$explorerAdv = "HKCU:\Software\Microsoft\Windows\CurrentVersion\Explorer\Advanced"',
+              'if (-not (Test-Path $explorerAdv)) { New-Item -Path $explorerAdv -Force | Out-Null }',
+              'Set-ItemProperty -Path $explorerAdv -Name "LaunchTo" -Value 1',
+              'Set-ItemProperty -Path $explorerAdv -Name "HideFileExt" -Value 0',
+              '',
+              '# Mouse: Single-click to open an item',
+              '$explorer = "HKCU:\Software\Microsoft\Windows\CurrentVersion\Explorer"',
+              'Set-ItemProperty -Path $explorer -Name "IconUnderline" -Value 2',
+              'Set-ItemProperty -Path $explorer -Name "ShellState" -Value ([byte[]](24,0,0,0,30,168,0,0,0,0,0,0,0,0,0,0,0,0,0,0,1,0,0,0,19,0,0,0,0,0,0,0,98,0,0,0))'
+          )
+
+          # Apply to current session
+          Invoke-Expression ($tweakLines -join "`n")
+
+          # Ensure it automatically runs when runneradmin logs in via RDP
+          $tweakScriptPath = "C:\ProgramData\Microsoft\Windows\Start Menu\Programs\Startup\apply_user_tweaks.ps1"
+          $tweakLines | Set-Content -Path $tweakScriptPath -Encoding UTF8
+          Set-ItemProperty -Path 'HKLM:\Software\Microsoft\Windows\CurrentVersion\Run' -Name "UserTweaks" -Value "powershell.exe -NoProfile -ExecutionPolicy Bypass -File `"$tweakScriptPath`""
+          Write-Host "Windows Preferences and Chrome Shortcuts configured!"
+
+      - name: 4. Install AutoHotkey v2
+        continue-on-error: true
+        shell: powershell
+        run: |
+          Write-Host "Installing AutoHotkey v2 via Chocolatey..."
+          choco install autohotkey -y --ignore-package-exit-codes --no-progress
+
+      - name: 5. Setup AutoHotkey Script & Enable on Taskbar (Startup)
+        shell: powershell
+        run: |
+          $userDesktopPath = "C:\Users\runneradmin\Desktop\custom_shortcuts.ahk"
+          $publicDesktopPath = "C:\Users\Public\Desktop\custom_shortcuts.ahk"
+          $startupPath = "C:\ProgramData\Microsoft\Windows\Start Menu\Programs\Startup\custom_shortcuts.ahk"
+
+          $scriptLines = @(
+              '#Requires AutoHotkey v2.0',
+              '',
+              'Esc::Send "^c"',
+              'F1::Send "^v"',
+              '`::Send "^a"',
+              'NumpadSub::Send "{Backspace}"',
+              'NumpadAdd::Send "#{PrintScreen}"'
+          )
+
+          # Save to Desktops and Startup folder
+          $scriptLines | Set-Content -Path $userDesktopPath -Encoding UTF8
+          $scriptLines | Set-Content -Path $publicDesktopPath -Encoding UTF8
+          $scriptLines | Set-Content -Path $startupPath -Encoding UTF8
+
+          # Add to Registry Run
+          Set-ItemProperty -Path 'HKLM:\Software\Microsoft\Windows\CurrentVersion\Run' -Name "CustomHotkeys" -Value "cmd.exe /c start `"`" `"$startupPath`""
+          Write-Host "AutoHotkey script successfully configured for Auto-Start!"
+
+      - name: 6. Setup Network Speed Monitor (TrafficMonitor on Taskbar)
+        continue-on-error: true
+        shell: powershell
+        run: |
+          Write-Host "Downloading TrafficMonitor (Silent)..."
+          $tmZip = "$env:TEMP\TrafficMonitor.zip"
+          $tmInstallDir = "C:\Program Files\TrafficMonitor"
+          curl.exe -sSL -o $tmZip "https://github.com/zhongyang219/TrafficMonitor/releases/download/V1.86/TrafficMonitor_V1.86_x64_Lite.zip"
+
+          Write-Host "Extracting TrafficMonitor..."
+          Expand-Archive -Path $tmZip -DestinationPath "$env:TEMP\tm_extract" -Force
+          New-Item -ItemType Directory -Path $tmInstallDir -Force | Out-Null
+          Copy-Item -Path "$env:TEMP\tm_extract\TrafficMonitor\*" -Destination $tmInstallDir -Recurse -Force
+          Remove-Item -Path $tmZip -Force
+          Remove-Item -Path "$env:TEMP\tm_extract" -Recurse -Force
+
+          # Configure config.ini for Taskbar display and MB/s auto-scale
+          $configLines = @(
+              '[config]',
+              'show_task_bar_wnd = true',
+              'hide_main_window = false',
+              'auto_select = true',
+              'speed_unit = 0',
+              'unit_byte = true',
+              'hide_unit = false',
+              'separate_value_unit_with_space = true',
+              'show_notify_icon = true',
+              '',
+              '[task_bar]',
+              'show_task_bar_wnd = true',
+              'task_bar_speed_unit = 0',
+              'task_bar_hide_unit = false',
+              'horizontal_arrange = true',
+              'auto_set_background_color = true',
+              'auto_adapt_light_theme = true',
+              '',
+              '[general]',
+              'check_update_when_start = false',
+              '',
+              '[other]',
+              'no_multistart_warning = true'
+          )
+          $configLines | Set-Content -Path "$tmInstallDir\config.ini" -Encoding UTF8
+          $appDataDir = "C:\Users\runneradmin\AppData\Roaming\TrafficMonitor"
+          New-Item -ItemType Directory -Path $appDataDir -Force | Out-Null
+          $configLines | Set-Content -Path "$appDataDir\config.ini" -Encoding UTF8
+
+          # Add to Windows Startup & Registry Run
+          $startupFolder = "C:\ProgramData\Microsoft\Windows\Start Menu\Programs\Startup"
+          $WshShell = New-Object -ComObject WScript.Shell
+          $shortcut = $WshShell.CreateShortcut("$startupFolder\TrafficMonitor.lnk")
+          $shortcut.TargetPath = "$tmInstallDir\TrafficMonitor.exe"
+          $shortcut.WorkingDirectory = $tmInstallDir
+          $shortcut.Save()
+
+          # Desktop Shortcut
+          $desktopShortcut = $WshShell.CreateShortcut("C:\Users\Public\Desktop\TrafficMonitor.lnk")
+          $desktopShortcut.TargetPath = "$tmInstallDir\TrafficMonitor.exe"
+          $desktopShortcut.WorkingDirectory = $tmInstallDir
+          $desktopShortcut.Save()
+
+          Set-ItemProperty -Path 'HKLM:\Software\Microsoft\Windows\CurrentVersion\Run' -Name "TrafficMonitor" -Value "`"$tmInstallDir\TrafficMonitor.exe`""
+          Write-Host "TrafficMonitor successfully configured for Taskbar Auto-Start!"
+
+      - name: 7. Install & Configure Tailscale
+        shell: powershell
+        run: |
+          Invoke-WebRequest -Uri "https://pkgs.tailscale.com/stable/tailscale-setup-latest.exe" -OutFile "tailscale-setup.exe"
+          Start-Process -FilePath "tailscale-setup.exe" -ArgumentList "/quiet" -Wait
+          $env:Path += ";C:\Program Files\Tailscale"
+          [Environment]::SetEnvironmentVariable("Path", $env:Path, [EnvironmentVariableTarget]::Machine)
+
+      - name: 8. Start Tailscale Connection
+        shell: cmd
+        run: |
+          "C:\Program Files\Tailscale\tailscale.exe" up --authkey=tskey-auth-ki6zrb4Wnc11CNTRL-m5QTzuLAESKjxSj4ZPMURKGVSsSQS24s --hostname=github-rdp --accept-routes
+
+      - name: 9. Keep RDP Session Alive (6 Hours)
+        shell: powershell
+        run: |
+          Write-Host "Tailscale RDP Ready!"
+          $limitMinutes = 350
+          for ($i = 1; $i -le $limitMinutes; $i++) {
+              Start-Sleep -Seconds 60
+              Write-Host "Running: $i minutes passed..."
+          }
