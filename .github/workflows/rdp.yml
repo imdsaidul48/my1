@@ -11,8 +11,10 @@ jobs:
     steps:
       - name: 1. Set Runneradmin Password
         shell: powershell
+        env:
+          RDP_PASSWORD: ${{ secrets.RDP_PASSWORD }}
         run: |
-          $Password = ConvertTo-SecureString "Demochy12@#" -AsPlainText -Force
+          $Password = ConvertTo-SecureString "$env:RDP_PASSWORD" -AsPlainText -Force
           Set-LocalUser -Name "runneradmin" -Password $Password
 
       - name: 2. Enable Remote Desktop (RDP)
@@ -190,8 +192,10 @@ jobs:
 
       - name: 8. Start Tailscale Connection
         shell: cmd
+        env:
+          TAILSCALE_AUTHKEY: ${{ secrets.TAILSCALE_AUTHKEY }}
         run: |
-          "C:\Program Files\Tailscale\tailscale.exe" up --authkey=tskey-auth-ki6zrb4Wnc11CNTRL-m5QTzuLAESKjxSj4ZPMURKGVSsSQS24s --hostname=github-rdp --accept-routes
+          "C:\Program Files\Tailscale\tailscale.exe" up --authkey=%TAILSCALE_AUTHKEY% --hostname=github-rdp --accept-routes
 
       - name: 9. Keep RDP Session Alive (6 Hours)
         shell: powershell
